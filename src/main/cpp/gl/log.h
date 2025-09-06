@@ -6,11 +6,11 @@
 
 #include "../includes.h"
 
-#define FORCE_SYNC_WITH_LOG_FILE 0
+#define FORCE_SYNC_WITH_LOG_FILE 1
 
-#define GLOBAL_DEBUG 0
+#define GLOBAL_DEBUG 1
 
-#define LOG_CALLED_FUNCS 0
+#define LOG_CALLED_FUNCS 1
 
 #ifdef __cplusplus
 extern "C" {
