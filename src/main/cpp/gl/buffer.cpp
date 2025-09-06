@@ -7,6 +7,7 @@
 #include "texture.h"
 #include <cstring>
 #include <vector>
+#include <cstdio>
 
 template <typename K, typename V>
 using unordered_map = ankerl::unordered_dense::map<K, V>;
@@ -17,7 +18,6 @@ GLuint bound_array;
 static GLint maxBufferId = 0;
 static GLint maxArrayId = 0;
 
-// 使用 vector<bool> 替代 vector<char> 节省内存
 static std::vector<GLuint> g_gen_buffers;
 static std::vector<bool> g_gen_buffer_exists;
 static std::vector<GLuint> g_free_buffer_ids;
@@ -45,7 +45,6 @@ enum BindingIndex : int {
     BINDING_COUNT
 };
 
-// 使用固定大小的数组替代 std::array
 static GLuint g_bound_buffers_arr[BINDING_COUNT] = {0};
 
 struct BufferMapping {
@@ -58,10 +57,8 @@ struct BufferMapping {
     bool persistent = false;
 };
 
-// 预分配空间
 static unordered_map<GLuint, BufferMapping> g_buffer_mapping;
 
-// 使用查表法加速目标到索引的转换
 static const GLenum binding_index_map[] = {
     GL_ARRAY_BUFFER, GL_ATOMIC_COUNTER_BUFFER, GL_COPY_READ_BUFFER, 
     GL_COPY_WRITE_BUFFER, GL_DRAW_INDIRECT_BUFFER, GL_DISPATCH_INDIRECT_BUFFER,
@@ -69,10 +66,9 @@ static const GLenum binding_index_map[] = {
     GL_SHADER_STORAGE_BUFFER, GL_TRANSFORM_FEEDBACK_BUFFER, GL_UNIFORM_BUFFER
 };
 
-// 内联函数并预分配额外空间以减少resize次数
 static inline void ensure_buffer_capacity(GLuint id) {
     if (g_gen_buffers.size() <= id) {
-        size_t new_size = id + 64; // 预分配额外空间
+        size_t new_size = id + 64;
         g_gen_buffers.resize(new_size, 0);
         g_gen_buffer_exists.resize(new_size, false);
         g_buffer_datasize.resize(new_size, 0);
@@ -81,7 +77,7 @@ static inline void ensure_buffer_capacity(GLuint id) {
 
 static inline void ensure_array_capacity(GLuint id) {
     if (g_gen_arrays.size() <= id) {
-        size_t new_size = id + 64; // 预分配额外空间
+        size_t new_size = id + 64;
         g_gen_arrays.resize(new_size, 0);
         g_gen_array_exists.resize(new_size, false);
         g_element_array_buffer_per_vao.resize(new_size, 0);
@@ -128,6 +124,7 @@ void remove_buffer(GLuint key) {
         if (it != g_buffer_mapping.end()) {
             if (it->second.shadowBuffer) {
                 free(it->second.shadowBuffer);
+                it->second.shadowBuffer = nullptr;
             }
             g_buffer_mapping.erase(it);
         }
@@ -175,7 +172,6 @@ void set_bound_buffer_by_target(GLenum target, GLuint buffer) {
 }
 
 GLuint find_bound_buffer(GLenum key) {
-    // 使用静态映射表避免重复计算
     static const std::pair<GLenum, GLenum> binding_pairs[] = {
         {GL_ARRAY_BUFFER_BINDING, GL_ARRAY_BUFFER},
         {GL_ATOMIC_COUNTER_BUFFER_BINDING, GL_ATOMIC_COUNTER_BUFFER},
@@ -204,6 +200,7 @@ GLuint find_bound_buffer(GLenum key) {
     return 0;
 }
 
+// atomic buffer相关
 struct atomic_buffer {
     GLuint id;
     GLsizeiptr size;
@@ -223,7 +220,6 @@ void bindAllAtomicCounterAsSSBO() {
     }
 }
 
-// 实现完整的内部格式大小计算
 size_t get_internal_format_size(GLenum internalformat) {
     switch (internalformat) {
         case GL_R8: return 1;
@@ -267,13 +263,18 @@ size_t get_internal_format_size(GLenum internalformat) {
             return 16;
 
         default:
-            // 安全默认值：4字节
             return 4;
     }
 }
+
+// ----------------------- 关键修复及日志 -----------------------
+
 void glGenBuffers(GLsizei n, GLuint* buffers) {
     for (int i = 0; i < n; ++i) {
         buffers[i] = gen_buffer();
+#if DEBUG
+        printf("[MGLOG] glGenBuffers: id=%u\n", buffers[i]);
+#endif
     }
 }
 
@@ -284,6 +285,9 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
             GLES.glDeleteBuffers(1, &real_buff);
         }
         remove_buffer(buffers[i]);
+#if DEBUG
+        printf("[MGLOG] glDeleteBuffers: id=%u\n", buffers[i]);
+#endif
     }
 }
 
@@ -299,6 +303,9 @@ void glBindBuffer(GLenum target, GLuint buffer) {
 
     if (!has_buffer(buffer) || buffer == 0) {
         GLES.glBindBuffer(target, buffer);
+#if DEBUG
+        printf("[MGLOG] glBindBuffer: target=%x, buffer=%u (not managed)\n", target, buffer);
+#endif
         return;
     }
 
@@ -306,374 +313,145 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     if (!real_buffer) {
         GLES.glGenBuffers(1, &real_buffer);
         modify_buffer(buffer, real_buffer);
+#if DEBUG
+        printf("[MGLOG] glBindBuffer: target=%x, buffer=%u (new real=%u)\n", target, buffer, real_buffer);
+#endif
     }
     GLES.glBindBuffer(target, real_buffer);
-}
-
-void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
-    if (!has_buffer(buffer) || buffer == 0) {
-        GLES.glBindBufferRange(target, index, buffer, offset, size);
-        return;
-    }
-
-    GLuint real_buffer = find_real_buffer(buffer);
-    if (!real_buffer) {
-        GLES.glGenBuffers(1, &real_buffer);
-        modify_buffer(buffer, real_buffer);
-    }
-    GLES.glBindBufferRange(target, index, real_buffer, offset, size);
-    if (target == GL_ATOMIC_COUNTER_BUFFER) {
-        if (g_buffer_map_atomic_buffer_info.empty()) {
-            g_buffer_map_atomic_buffer_info.resize(GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS, {});
-        }
-        g_buffer_map_atomic_buffer_info[index] = {buffer, size, offset};
-    }
-}
-
-void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
-    if (!has_buffer(buffer) || buffer == 0) {
-        GLES.glBindBufferBase(target, index, buffer);
-        return;
-    }
-
-    GLuint real_buffer = find_real_buffer(buffer);
-    if (!real_buffer) {
-        GLES.glGenBuffers(1, &real_buffer);
-        modify_buffer(buffer, real_buffer);
-    }
-    GLES.glBindBufferBase(target, index, real_buffer);
-    if (target == GL_SHADER_STORAGE_BUFFER) {
-        if (g_buffer_map_ssbo_id.empty()) {
-            g_buffer_map_ssbo_id.resize(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, 0);
-        }
-        g_buffer_map_ssbo_id[index] = buffer;
-    }
-}
-
-void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
-    if (!has_buffer(buffer) || buffer == 0) {
-        GLES.glBindVertexBuffer(bindingindex, buffer, offset, stride);
-        return;
-    }
-
-    GLuint real_buffer = find_real_buffer(buffer);
-    if (!real_buffer) {
-        GLES.glGenBuffers(1, &real_buffer);
-        modify_buffer(buffer, real_buffer);
-    }
-    GLES.glBindVertexBuffer(bindingindex, real_buffer, offset, stride);
-}
-
-void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
-    if (target != GL_TEXTURE_BUFFER) return;
-
-    if (!has_buffer(buffer) || buffer == 0) {
-        GLES.glTexBuffer(target, internalformat, buffer);
-        return;
-    }
-
-    GLuint real_buffer = find_real_buffer(buffer);
-    if (!real_buffer) {
-        GLES.glGenBuffers(1, &real_buffer);
-        modify_buffer(buffer, real_buffer);
-    }
-
-    if (hardware->emulate_texture_buffer) {
-        // 优化：简化纹理缓冲区模拟，减少状态保存和恢复次数
-        GLint boundTexture = 0;
-        GLint prev_pixel_buffer_binding = 0;
-
-        GLES.glActiveTexture(GL_TEXTURE0 + 15);
-        GLES.glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
-        if (!boundTexture) return;
-
-        GLES.glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &prev_pixel_buffer_binding);
-
-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
-        GLint bufferSize;
-        GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &bufferSize);
-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-
-        GLES.glBindTexture(GL_TEXTURE_2D, boundTexture);
-
-        const GLuint MAX_WIDTH = 8192;
-        GLuint pixelSize = get_internal_format_size(internalformat);
-        GLuint numElements = bufferSize / pixelSize;
-
-        GLuint width = numElements;
-        GLuint height = 1;
-        if (width > MAX_WIDTH) {
-            width = MAX_WIDTH;
-            height = (numElements + MAX_WIDTH - 1) / MAX_WIDTH;
-        }
-
-        // 保存状态
-        GLint prev_alignment, prev_row_length, prev_skip_pixels, prev_skip_rows;
-        GLES.glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_alignment);
-        GLES.glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prev_row_length);
-        GLES.glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &prev_skip_pixels);
-        GLES.glGetIntegerv(GL_UNPACK_SKIP_ROWS, &prev_skip_rows);
-
-        GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-
-        GLES.glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, GL_RED_INTEGER, GL_BYTE, nullptr);
-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, real_buffer);
-
-        // 优化：使用更高效的纹理上传方式（如果高度为1，则一次上传）
-        if (height == 1) {
-            GLES.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 1, GL_RED_INTEGER, GL_BYTE, nullptr);
-        } else {
-            for (GLuint row = 0; row < height; ++row) {
-                void* offset = (void*)(row * width * pixelSize);
-                GLES.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, row, width, 1, GL_RED_INTEGER, GL_BYTE, offset);
-            }
-        }
-
-        // 恢复状态
-        GLES.glPixelStorei(GL_UNPACK_ALIGNMENT, prev_alignment);
-        GLES.glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row_length);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_PIXELS, prev_skip_pixels);
-        GLES.glPixelStorei(GL_UNPACK_SKIP_ROWS, prev_skip_rows);
-
-        auto tex = mgGetTexObjectByTarget(target);
-        tex->target = ConvertGLEnumToTextureTarget(target);
-        tex->internal_format = internalformat;
-        tex->width = width;
-        tex->height = height;
-        tex->depth = 1;
-        tex->swizzle_param[0] = GL_RED;
-        tex->swizzle_param[1] = GL_GREEN;
-        tex->swizzle_param[2] = GL_BLUE;
-        tex->swizzle_param[3] = GL_ALPHA;
-
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-        GLES.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-
-        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, prev_pixel_buffer_binding);
-        GLES.glActiveTexture(GL_TEXTURE0 + gl_state->current_tex_unit);
-        return;
-    }
-
-    GLES.glTexBuffer(target, internalformat, real_buffer);
-}
-
-void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size) {
-    if (!has_buffer(buffer) || buffer == 0) {
-        GLES.glTexBufferRange(target, internalformat, buffer, offset, size);
-        return;
-    }
-
-    GLuint real_buffer = find_real_buffer(buffer);
-    if (!real_buffer) {
-        GLES.glGenBuffers(1, &real_buffer);
-        modify_buffer(buffer, real_buffer);
-    }
-    GLES.glTexBufferRange(target, internalformat, real_buffer, offset, size);
+#if DEBUG
+    printf("[MGLOG] glBindBuffer: target=%x, buffer=%u (real=%u)\n", target, buffer, real_buffer);
+#endif
 }
 
 void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
-    printf("[MGLOG] glBufferData: target=%x, buffer=%u, size=%zd\n", target, buffer, size);
     GLuint buffer = find_bound_buffer(target);
+#if DEBUG
+    printf("[MGLOG] glBufferData: target=%x, buffer=%u, size=%zd\n", target, buffer, size);
+#endif
     if (buffer && has_buffer(buffer)) {
         auto& mapping = g_buffer_mapping[buffer];
-        // 优化：重用现有内存，避免频繁分配和释放
         if (mapping.shadowBuffer && mapping.length != size) {
             free(mapping.shadowBuffer);
             mapping.shadowBuffer = nullptr;
         }
-
-        if (!mapping.shadowBuffer) {
+        if (!mapping.shadowBuffer && size > 0) {
             mapping.shadowBuffer = malloc(size);
-            // 关键修复：确保新分配的缓冲区初始化为0
             if (mapping.shadowBuffer) {
                 memset(mapping.shadowBuffer, 0, size);
             }
         }
-
+        mapping.length = size;
         if (data && mapping.shadowBuffer) {
             memcpy(mapping.shadowBuffer, data, size);
         }
-        // 如果没有提供数据，保持初始化的0值
     }
-
     GLES.glBufferData(target, size, data, usage);
     set_buffer_data_size(buffer, size);
 }
 
-void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data) {
-    GLuint buffer = find_bound_buffer(target);
-    if (buffer && has_buffer(buffer)) {
-        auto it = g_buffer_mapping.find(buffer);
-        if (it != g_buffer_mapping.end() && it->second.shadowBuffer) {
-            void* shadowPtr = static_cast<char*>(it->second.shadowBuffer) + offset;
-            memcpy(shadowPtr, data, size);
+void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
+    GLenum usage = (flags & GL_DYNAMIC_STORAGE_BIT) ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW;
+    GLES.glBufferData(target, size, data, usage);
 
-            if (it->second.isMapped && (it->second.access & GL_MAP_WRITE_BIT)) {
-                it->second.isDirty = true;
+    GLuint buffer = find_bound_buffer(target);
+#if DEBUG
+    printf("[MGLOG] glBufferStorage: target=%x, buffer=%u, size=%zd\n", target, buffer, size);
+#endif
+    if (buffer && has_buffer(buffer)) {
+        auto& mapping = g_buffer_mapping[buffer];
+        if (mapping.shadowBuffer && mapping.length != size) {
+            free(mapping.shadowBuffer);
+            mapping.shadowBuffer = nullptr;
+        }
+        if (!mapping.shadowBuffer && size > 0) {
+            mapping.shadowBuffer = malloc(size);
+            if (mapping.shadowBuffer) {
+                memset(mapping.shadowBuffer, 0, size);
             }
         }
-    }
-
-    GLES.glBufferSubData(target, offset, size, data);
-}
-
-void glGenVertexArrays(GLsizei n, GLuint* arrays) {
-    for (int i = 0; i < n; ++i) {
-        arrays[i] = gen_array();
-    }
-}
-
-void glDeleteVertexArrays(GLsizei n, const GLuint* arrays) {
-    for (int i = 0; i < n; ++i) {
-        if (find_real_array(arrays[i])) {
-            GLuint real_array = find_real_array(arrays[i]);
-            GLES.glDeleteVertexArrays(1, &real_array);
+        mapping.length = size;
+        if (data && mapping.shadowBuffer) {
+            memcpy(mapping.shadowBuffer, data, size);
         }
-        remove_array(arrays[i]);
+        mapping.isMapped = false;
     }
+    set_buffer_data_size(buffer, size);
 }
 
-GLboolean glIsVertexArray(GLuint array) {
-    return has_array(array);
-}
-
-void glBindVertexArray(GLuint array) {
-    bound_array = array;
-    // 更新绑定的IBO
-    set_bound_buffer_by_target(GL_ELEMENT_ARRAY_BUFFER, get_ibo_by_vao(array));
-
-    if (!has_array(array) || array == 0) {
-        GLES.glBindVertexArray(array);
-        return;
-    }
-
-    GLuint real_array = find_real_array(array);
-    if (!real_array) {
-        GLES.glGenVertexArrays(1, &real_array);
-        modify_array(array, real_array);
-    }
-    GLES.glBindVertexArray(real_array);
-}
-void* glMapBuffer(GLenum target, GLenum access) {
-    GLuint buffer = find_bound_buffer(target);
-    if (!buffer || !has_buffer(buffer)) {
-        return nullptr;
-    }
-
-    size_t size = get_buffer_data_size(buffer);
-    if (size == 0) {
-        return nullptr;
-    }
-
-    GLbitfield flags = 0;
-    switch (access) {
-        case GL_READ_ONLY:
-            flags = GL_MAP_READ_BIT;
-            break;
-        case GL_WRITE_ONLY:
-            flags = GL_MAP_WRITE_BIT;
-            break;
-        case GL_READ_WRITE:
-            flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
-            break;
-        default:
-            return nullptr;
-    }
-
-    return glMapBufferRange(target, 0, size, flags);
-}
-
-#if GLOBAL_DEBUG || DEBUG
-#include <fstream>
-#define BIN_FILE_PREFIX "/sdcard/MG/buf/"
-#endif
-
-#if !defined(__APPLE__)
-extern "C"
-{
-GLAPI GLAPIENTRY void* glMapBufferARB(GLenum target, GLenum access) __attribute__((alias("glMapBuffer")));
-GLAPI GLAPIENTRY void glBufferDataARB(GLenum target, GLsizeiptr size, const void* data, GLenum usage)
-__attribute__((alias("glBufferData")));
-GLAPI GLAPIENTRY GLboolean glUnmapBufferARB(GLenum target) __attribute__((alias("glUnmapBuffer")));
-GLAPI GLAPIENTRY void glBufferStorageARB(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags)
-__attribute__((alias("glBufferStorage")));
-GLAPI GLAPIENTRY void glBindBufferARB(GLenum target, GLuint buffer) __attribute__((alias("glBindBuffer")));
-GLAPI GLAPIENTRY void glBufferSubDataARB(GLenum target, GLintptr offset, GLsizeiptr size, const void *data) __attribute__((alias("glBufferSubData")));
-}
-#endif
-
-// ================ 关键修复开始 ================ //
+// 关键修复：更健壮的 map 逻辑
 void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     GLuint buffer = find_bound_buffer(target);
-    
-    
-    // 修复点1: 正确处理非托管缓冲区
+    size_t bufferSize = get_buffer_data_size(buffer);
+#if DEBUG
+    printf("[MGLOG] glMapBufferRange: target=%x, buffer=%u, offset=%zd, length=%zd, bufferSize=%zd\n", target, buffer, offset, length, bufferSize);
+#endif
     if (!buffer || !has_buffer(buffer) || buffer == 0) {
+#if DEBUG
+        printf("[MGLOG] glMapBufferRange: buffer not managed, fallback to GLES.\n");
+#endif
         return GLES.glMapBufferRange(target, offset, length, access);
     }
-
-    size_t bufferSize = get_buffer_data_size(buffer);
-    printf("[MGLOG] glMapBufferRange: target=%x, buffer=%u, offset=%zd, length=%zd, bufferSize=%zd\n", target, buffer, offset, length, bufferSize);
     if (bufferSize == 0) {
+#if DEBUG
         printf("[MGLOG] ERROR: bufferSize==0 for buffer %u!\n", buffer);
+#endif
+        // 容错：分配一个最小缓冲区，避免崩溃
+        bufferSize = 4;
+        set_buffer_data_size(buffer, bufferSize);
+        auto& mapping = g_buffer_mapping[buffer];
+        if (!mapping.shadowBuffer) {
+            mapping.shadowBuffer = malloc(bufferSize);
+            if (mapping.shadowBuffer) {
+                memset(mapping.shadowBuffer, 0, bufferSize);
+            }
+        }
+        mapping.length = bufferSize;
     }
-    
     if (offset < 0 || (size_t)(offset + length) > bufferSize) {
+#if DEBUG
+        printf("[MGLOG] ERROR: map offset/length out of range! offset=%zd, length=%zd, bufferSize=%zd\n", offset, length, bufferSize);
+#endif
         return nullptr;
     }
-
     auto& mapping = g_buffer_mapping[buffer];
     if (mapping.isMapped) {
+#if DEBUG
+        printf("[MGLOG] ERROR: buffer %u already mapped!\n", buffer);
+#endif
         return nullptr;
     }
-
     if (!mapping.shadowBuffer) {
         mapping.shadowBuffer = malloc(bufferSize);
         if (!mapping.shadowBuffer) {
+#if DEBUG
+            printf("[MGLOG] ERROR: malloc failed for buffer %u, size=%zd\n", buffer, bufferSize);
+#endif
             return nullptr;
         }
-
-        // 关键修复：确保新分配的缓冲区初始化为0
         memset(mapping.shadowBuffer, 0, bufferSize);
-
-        // 修复点2: 移除强制从GPU读取数据的逻辑
-        // 仅在映射为写操作时标记为脏数据
-        if (access & GL_MAP_WRITE_BIT) {
-            mapping.isDirty = true;
-        }
     }
-
     mapping.isMapped = true;
     mapping.access = access;
     mapping.offset = offset;
     mapping.length = length;
     mapping.persistent = (access & GL_MAP_PERSISTENT_BIT) != 0;
-
     return static_cast<char*>(mapping.shadowBuffer) + offset;
 }
 
 GLboolean glUnmapBuffer(GLenum target) {
     GLuint buffer = find_bound_buffer(target);
-    
-    // 修复点3: 正确处理非托管缓冲区
+#if DEBUG
+    printf("[MGLOG] glUnmapBuffer: target=%x, buffer=%u\n", target, buffer);
+#endif
     if (!buffer || !has_buffer(buffer) || buffer == 0) {
         return GLES.glUnmapBuffer(target);
     }
-
     auto it = g_buffer_mapping.find(buffer);
     if (it == g_buffer_mapping.end() || !it->second.isMapped) {
         return GL_FALSE;
     }
-
     auto& mapping = it->second;
     GLboolean result = GL_TRUE;
-
-    // 优化：仅在数据脏且需要写入时才上传到GPU
     if ((mapping.access & GL_MAP_WRITE_BIT) && mapping.isDirty) {
         GLuint real_buffer = find_real_buffer(buffer);
         if (real_buffer) {
@@ -685,10 +463,10 @@ GLboolean glUnmapBuffer(GLenum target) {
             result = GL_FALSE;
         }
     }
-
     mapping.isMapped = false;
     return result;
 }
+
 // ================ 关键修复结束 ================ //
 
 void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
