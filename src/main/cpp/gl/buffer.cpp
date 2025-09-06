@@ -485,16 +485,19 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
             free(mapping.shadowBuffer);
             mapping.shadowBuffer = nullptr;
         }
-        
+
         if (!mapping.shadowBuffer) {
             mapping.shadowBuffer = malloc(size);
+            // 关键修复：确保新分配的缓冲区初始化为0
+            if (mapping.shadowBuffer) {
+                memset(mapping.shadowBuffer, 0, size);
+            }
         }
-        
-        if (data) {
+
+        if (data && mapping.shadowBuffer) {
             memcpy(mapping.shadowBuffer, data, size);
-        } else if (mapping.shadowBuffer) {
-            memset(mapping.shadowBuffer, 0, size);
         }
+        // 如果没有提供数据，保持初始化的0值
     }
 
     GLES.glBufferData(target, size, data, usage);
@@ -625,7 +628,10 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
             return nullptr;
         }
         
-        // 优化：仅在需要时从GPU读取数据
+        // 关键修复：确保新分配的缓冲区初始化为0
+        memset(mapping.shadowBuffer, 0, bufferSize);
+
+        // 仅在需要时从GPU读取数据
         if (access & GL_MAP_READ_BIT) {
             GLuint real_buffer = find_real_buffer(buffer);
             if (real_buffer) {
@@ -635,22 +641,7 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
                     memcpy(mapping.shadowBuffer, gpuData, bufferSize);
                     GLES.glUnmapBuffer(target);
                 }
-            }
-        } else if (access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT)) {
-            // 无效化范围/缓冲区，不需要读取数据
-        } else {
-            // 其他情况需要保留现有数据
-            if (access & GL_MAP_WRITE_BIT) {
-                // 从GPU读取现有数据
-                GLuint real_buffer = find_real_buffer(buffer);
-                if (real_buffer) {
-                    GLES.glBindBuffer(target, real_buffer);
-                    void* gpuData = GLES.glMapBufferRange(target, 0, bufferSize, GL_MAP_READ_BIT);
-                    if (gpuData) {
-                        memcpy(mapping.shadowBuffer, gpuData, bufferSize);
-                        GLES.glUnmapBuffer(target);
-                    }
-                }
+                // 如果映射失败，保持初始化的0值
             }
         }
     }
@@ -707,15 +698,17 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
             free(mapping.shadowBuffer);
             mapping.shadowBuffer = nullptr;
         }
-        
+
         if (!mapping.shadowBuffer) {
             mapping.shadowBuffer = malloc(size);
+            // 关键修复：确保新分配的缓冲区初始化为0
+            if (mapping.shadowBuffer) {
+                memset(mapping.shadowBuffer, 0, size);
+            }
         }
-        
-        if (data) {
+
+        if (data && mapping.shadowBuffer) {
             memcpy(mapping.shadowBuffer, data, size);
-        } else if (mapping.shadowBuffer) {
-            memset(mapping.shadowBuffer, 0, size);
         }
         mapping.isMapped = false;
     }
@@ -765,7 +758,7 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOff
     // 优化：直接使用OpenGL的复制功能，避免映射操作
     GLuint realReadBuffer = find_real_buffer(readBuffer);
     GLuint realWriteBuffer = find_real_buffer(writeBuffer);
-    
+
     if (realReadBuffer && realWriteBuffer) {
         GLES.glBindBuffer(readTarget, realReadBuffer);
         GLES.glBindBuffer(writeTarget, realWriteBuffer);
@@ -787,7 +780,7 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOff
         }
     } else if (itWrite != g_buffer_mapping.end() && itWrite->second.shadowBuffer) {
         free(itWrite->second.shadowBuffer);
-        itWrite->second.shadowBuffer = nullptr;
+        itWrite->second.shhadowBuffer = nullptr;
         itWrite->second.isMapped = false;
     }
 }
@@ -799,7 +792,7 @@ void InitBufferMap(size_t expectedSize) {
     g_gen_buffer_exists.reserve(new_size);
     g_buffer_datasize.reserve(new_size);
     g_buffer_mapping.reserve(expectedSize);
-    
+
     // 初始化为空，不设置大小为1
     g_gen_buffers.clear();
     g_gen_buffer_exists.clear();
@@ -811,7 +804,7 @@ void InitVertexArrayMap(size_t expectedSize) {
     g_gen_arrays.reserve(new_size);
     g_gen_array_exists.reserve(new_size);
     g_element_array_buffer_per_vao.reserve(new_size);
-    
+
     // 初始化为空，不设置大小为1
     g_gen_arrays.clear();
     g_gen_array_exists.clear();
