@@ -780,7 +780,7 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOff
         }
     } else if (itWrite != g_buffer_mapping.end() && itWrite->second.shadowBuffer) {
         free(itWrite->second.shadowBuffer);
-        itWrite->second.shhadowBuffer = nullptr;
+        itWrite->second.shadowBuffer = nullptr;
         itWrite->second.isMapped = false;
     }
 }
