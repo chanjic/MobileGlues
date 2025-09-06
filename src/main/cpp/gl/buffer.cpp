@@ -11,7 +11,7 @@
 template <typename K, typename V>
 using unordered_map = ankerl::unordered_dense::map<K, V>;
 
-#define DEBUG 0
+#define DEBUG 1
 
 GLuint bound_array;
 static GLint maxBufferId = 0;
