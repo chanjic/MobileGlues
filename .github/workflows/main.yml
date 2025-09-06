@@ -1,7 +1,6 @@
 name: Build MobileGlues for Android
 
 on:
-  push:
   workflow_dispatch:
 
 env:
