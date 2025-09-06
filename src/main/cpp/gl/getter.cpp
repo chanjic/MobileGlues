@@ -5,41 +5,58 @@
 #include "getter.h"
 #include "buffer.h"
 #include <string>
-#include <format>
 #include <vector>
+#include <memory>
+#include <cstring>
+#include <algorithm>
 #include "FSR1/FSR1.h"
 
 #define DEBUG 0
 
 Version GLVersion;
 
+// 小工具函数，inline减少调用消耗
+inline int count_spaces(const std::string& str) {
+    return std::count(str.begin(), str.end(), ' ');
+}
+
+// 用 string_view 和更高效的分割
+inline std::vector<std::string> split(const std::string& str, char delim) {
+    std::vector<std::string> tokens;
+    size_t start = 0, end;
+    while ((end = str.find(delim, start)) != std::string::npos) {
+        if (end != start)
+            tokens.emplace_back(str.substr(start, end - start));
+        start = end + 1;
+    }
+    if (start < str.size())
+        tokens.emplace_back(str.substr(start));
+    return tokens;
+}
+
 void glGetIntegerv(GLenum pname, GLint *params) {
+#if DEBUG
     LOG()
     LOG_D("glGetIntegerv, pname: %s", glEnumToString(pname))
+#endif
     switch (pname) {
         case GL_CONTEXT_PROFILE_MASK:
             (*params) = GL_CONTEXT_CORE_PROFILE_BIT;
             break;
-        case GL_NUM_EXTENSIONS:
+        case GL_NUM_EXTENSIONS: {
             static GLint num_extensions = -1;
             if (num_extensions == -1) {
                 const GLubyte* ext_str = glGetString(GL_EXTENSIONS);
                 if (ext_str) {
                     std::string copy_str((const char*)ext_str);
-                    std::string token;
-                    size_t pos = 0;
-                    num_extensions = 0;
-                    while ((pos = copy_str.find(' ')) != std::string::npos) {
-                        num_extensions++;
-                        copy_str.erase(0, pos + 1);
-                    }
-                    if (!copy_str.empty()) num_extensions++; // Count the last token
+                    num_extensions = static_cast<GLint>(split(copy_str, ' ').size());
                 } else {
                     num_extensions = 0;
                 }
             }
             (*params) = num_extensions;
             break;
+        }
         case GL_MAJOR_VERSION:
             (*params) = GLVersion.Major;
             break;
@@ -51,7 +68,6 @@ void glGetIntegerv(GLenum pname, GLint *params) {
             GLES.glGetIntegerv(pname, &es_params);
             CHECK_GL_ERROR
             (*params) = es_params * 2;
-            // Why is the real GL_MAX_TEXTURE_IMAGE_UNITS bigger than what GLES.glGetIntegerv returns?
             break;
         }
         case GL_CONTEXT_FLAGS: {
@@ -71,33 +87,40 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
         case GL_UNIFORM_BUFFER_BINDING:
             (*params) = (int) find_bound_buffer(pname);
+#if DEBUG
             LOG_D("  -> %d",*params)
+#endif
             break;
         case GL_VERTEX_ARRAY_BINDING:
             (*params) = (int) find_bound_array();
             break;
         default:
             GLES.glGetIntegerv(pname, params);
+#if DEBUG
             LOG_D("  -> %d",*params)
+#endif
             CHECK_GL_ERROR
     }
 }
 
 GLenum glGetError() {
+#if DEBUG
     LOG()
+#endif
     GLenum err = GLES.glGetError();
-    // just clear gles error, no reporting
+#if DEBUG
     if (err != GL_NO_ERROR) {
-        // no logging without DEBUG
         LOG_W("glGetError\n -> %d", err)
         LOG_W("Now try to cheat.")
     }
+#endif
     return GL_NO_ERROR;
 }
 
+// 用静态变量一次性缓存
 static std::string es_ext;
 std::string GetExtensionsList() {
-    return es_ext.c_str();
+    return es_ext;
 }
 
 void InitGLESBaseExtensions() {
@@ -130,7 +153,8 @@ void AppendExtension(const char* ext) {
     es_ext += ' ';
 }
 
-std::string getBeforeThirdSpace(const std::string& str) {
+// 用更高效的string_view和查找
+inline std::string getBeforeThirdSpace(const std::string& str) {
     int spaceCount = 0;
     size_t endPos = 0;
     for (size_t i = 0; i < str.length(); ++i) {
@@ -141,63 +165,56 @@ std::string getBeforeThirdSpace(const std::string& str) {
                 break;
             }
         }
-        if (spaceCount < 3) endPos = str.length();
     }
-
+    if (spaceCount < 3) endPos = str.length();
     return str.substr(0, endPos);
 }
 
+// 静态缓存gpuName，减少重复分配
 std::string getGpuName() {
+    static std::string lastGpuName;
+    if (!lastGpuName.empty()) return lastGpuName;
     std::string gpuName = std::string((char *)GLES.glGetString(GL_RENDERER));
+    if (gpuName.empty()) return "<unknown>";
 
-    if (gpuName.empty()) {
-        return "<unknown>";
-    }
-
-    // MetalANGLE, ANGLE (Metal Renderer: Apple * GPU)
     if (gpuName.find("MetalANGLE, ANGLE") != std::string::npos) {
         if (gpuName.length() < 25) {
-            return gpuName;
+            lastGpuName = gpuName;
+            return lastGpuName;
         }
-
         std::string gpu = gpuName.substr(23, gpuName.length() - 24);
-        std::string formattedGpuName = gpu + " | MetalANGLE | Metal";
-        return formattedGpuName;
+        lastGpuName = gpu + " | MetalANGLE | Metal";
+        return lastGpuName;
     }
-
-    // Vulkan ANGLE
     if (gpuName.rfind("ANGLE", 0) == 0 && gpuName.find("Vulkan") != std::string::npos) {
         size_t firstParen = gpuName.find('(');
         size_t secondParen = gpuName.find('(', firstParen + 1);
         size_t lastParen = gpuName.rfind('(');
-
         std::string gpu = gpuName.substr(secondParen + 1, lastParen - secondParen - 2);
-
         size_t vulkanStart = gpuName.find("Vulkan ");
         size_t vulkanEnd = gpuName.find(' ', vulkanStart + 7);
         std::string vulkanVersion = gpuName.substr(vulkanStart + 7, vulkanEnd - (vulkanStart + 7));
-
-        std::string formattedGpuName = gpu + " | ANGLE | Vulkan " + vulkanVersion;
-
-        return formattedGpuName;
+        lastGpuName = gpu + " | ANGLE | Vulkan " + vulkanVersion;
+        return lastGpuName;
     }
-
-    return gpuName;
+    lastGpuName = gpuName;
+    return lastGpuName;
 }
 
 void set_es_version() {
     std::string ESVersionStr = getBeforeThirdSpace(std::string((const char*)GLES.glGetString(GL_VERSION)));
-    int major, minor;
-
+    int major = 0, minor = 0;
     if (sscanf(ESVersionStr.c_str(), "OpenGL ES %d.%d", &major, &minor) == 2) {
         hardware->es_version = major * 100 + minor * 10;
     } else {
         hardware->es_version = 300;
     }
+#if DEBUG
     LOG_I("OpenGL ES Version: %s (%d)", ESVersionStr.c_str(), hardware->es_version)
     if (hardware->es_version < 300) {
         LOG_I("OpenGL ES version is lower than 3.0! This version is not supported!")
     }
+#endif
 }
 
 std::string getGLESName() {
@@ -207,13 +224,16 @@ std::string getGLESName() {
 static std::string rendererString;
 static std::string vendorString;
 static std::string versionString;
+
+// 用静态缓存字符串，减少重复构造
 const GLubyte * glGetString( GLenum name ) {
+#if DEBUG
     LOG()
+#endif
     switch (name) {
         case GL_VENDOR: {
             if(vendorString.empty()) {
-                std::string vendor = "Swung0x48, BZLZHH, Tungsten";
-                vendorString = vendor;
+                vendorString = "Swung0x48, BZLZHH, Tungsten";
             }
             return (const GLubyte *)vendorString.c_str();
         }
@@ -221,13 +241,11 @@ const GLubyte * glGetString( GLenum name ) {
             if (versionString.empty()) {
                 versionString = GLVersion.toString();
                 if (GLVersion.toInt(2) == DEFAULT_GL_VERSION) {
-					versionString += " MobileGlues ";
-                }
-                else {
-					Version defaultVersion = Version(DEFAULT_GL_VERSION);
+                    versionString += " MobileGlues ";
+                } else {
+                    Version defaultVersion = Version(DEFAULT_GL_VERSION);
                     versionString += " §4§l(" + defaultVersion.toString() + ") MobileGlues§r ";
                 }
-
                 versionString += std::to_string(MAJOR) + "."
                                 +  std::to_string(MINOR) + "."
                                 +  std::to_string(REVISION);
@@ -242,20 +260,16 @@ const GLubyte * glGetString( GLenum name ) {
 #elif VERSION_TYPE == VERSION_DEVELOPMENT
                 versionString += "·Dev";
 #elif VERSION_TYPE == VERSION_RC
-				versionString += "·RC" + std::to_string(VERSION_RC_NUMBER);
+                versionString += "·RC" + std::to_string(VERSION_RC_NUMBER);
 #endif
 #endif
                 versionString += VERSION_SUFFIX;
             }
             return (const GLubyte *)versionString.c_str();
         }
-
-        case GL_RENDERER: 
-        {
-            if (rendererString == std::string("")) {
-                std::string gpuName = getGpuName();
-                std::string glesName = getGLESName();
-                rendererString = std::string(gpuName) + " | " + std::string(glesName);
+        case GL_RENDERER: {
+            if (rendererString.empty()) {
+                rendererString = getGpuName() + " | " + getGLESName();
             }
             return (const GLubyte *)rendererString.c_str();
         }
@@ -271,81 +285,66 @@ const GLubyte * glGetString( GLenum name ) {
     }
 }
 
+// 用 vector 缓存分割结果，避免重复分割和malloc/free
 const GLubyte * glGetStringi(GLenum name, GLuint index) {
+#if DEBUG
     LOG()
-    typedef struct {
+#endif
+    struct StringCache {
         GLenum name;
-        const char** parts;
-        GLuint count;
-    } StringCache;
-    static StringCache caches[] = {
-            {GL_EXTENSIONS, nullptr, 0},
-            {GL_VENDOR, nullptr, 0},
-            {GL_VERSION, nullptr, 0},
-            {GL_SHADING_LANGUAGE_VERSION, nullptr, 0}
+        std::vector<std::string> parts;
     };
-    static int initialized = 0;
+    static std::vector<StringCache> caches = {
+        {GL_EXTENSIONS, {}},
+        {GL_VENDOR, {}},
+        {GL_VERSION, {}},
+        {GL_SHADING_LANGUAGE_VERSION, {}}
+    };
+    static bool initialized = false;
     if (!initialized) {
-        for (auto & cache : caches) {
-            GLenum target = cache.name;
-            const GLubyte* str = nullptr;
-            const char* delimiter = " ";
-
-            switch (target) {
+        for (auto &cache : caches) {
+            std::string str;
+            switch (cache.name) {
                 case GL_VENDOR:
-                    str = (const GLubyte*)"Swung0x48, BZLZHH, Tungsten";
-                    delimiter = ", ";
+                    str = "Swung0x48, BZLZHH, Tungsten";
+                    cache.parts = split(str, ',');
+                    for (auto& s : cache.parts) s.erase(0, s.find_first_not_of(" "));
                     break;
                 case GL_VERSION:
-                    str = (const GLubyte*)
-                        (GLVersion.toString() + " MobileGlues").c_str();
-                    delimiter = " .";
+                    str = GLVersion.toString() + " MobileGlues";
+                    cache.parts = split(str, ' ');
                     break;
                 case GL_SHADING_LANGUAGE_VERSION:
-                    str = (const GLubyte*)"4.60 MobileGlues with glslang and SPIRV-Cross";
+                    str = "4.60 MobileGlues with glslang and SPIRV-Cross";
+                    cache.parts = split(str, ' ');
                     break;
-                case GL_EXTENSIONS:
-                    str = glGetString(GL_EXTENSIONS);
+                case GL_EXTENSIONS: {
+                    const GLubyte* ext_str = glGetString(GL_EXTENSIONS);
+                    if (ext_str) {
+                        str = (const char*)ext_str;
+                        cache.parts = split(str, ' ');
+                    }
                     break;
+                }
                 default:
-                    return GLES.glGetStringi(name, index);
+                    break;
             }
-
-            if (!str) continue;
-
-            std::string copy_str((const char*)str);
-            std::string token_str;
-            size_t start = 0;
-            size_t end = copy_str.find_first_of(delimiter);
-
-            while (end != std::string::npos) {
-                token_str = copy_str.substr(start, end - start);
-                cache.parts = (const char**)realloc(cache.parts, (cache.count + 1) * sizeof(char*));
-                cache.parts[cache.count++] = strdup(token_str.c_str());
-                start = end + 1;
-                end = copy_str.find_first_of(delimiter, start);
-            }
-            token_str = copy_str.substr(start); // Get the last token
-            cache.parts = (const char**)realloc(cache.parts, (cache.count + 1) * sizeof(char*));
-            cache.parts[cache.count++] = strdup(token_str.c_str());
         }
-        initialized = 1;
+        initialized = true;
     }
-
-    for (auto & cache : caches) {
+    for (auto &cache : caches) {
         if (cache.name == name) {
-            if (index >= cache.count) {
-                return nullptr;
-            }
-            return (const GLubyte*)cache.parts[index];
+            if (index >= cache.parts.size()) return nullptr;
+            return (const GLubyte*)cache.parts[index].c_str();
         }
     }
-
-    return nullptr;
+    return GLES.glGetStringi(name, index);
 }
 
 void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
+#if DEBUG
     LOG()
+#endif
     if (GLES.glGetQueryObjectivEXT) {
         GLES.glGetQueryObjectivEXT(id, pname, params);
         CHECK_GL_ERROR
@@ -353,7 +352,9 @@ void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
 }
 
 void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params) {
+#if DEBUG
     LOG()
+#endif
     if (GLES.glGetQueryObjecti64vEXT) {
         GLES.glGetQueryObjecti64vEXT(id, pname, params);
         CHECK_GL_ERROR
