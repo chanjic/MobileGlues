@@ -477,6 +477,7 @@ void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLint
 }
 
 void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+    printf("[MGLOG] glBufferData: target=%x, buffer=%u, size=%zd\n", target, buffer, size);
     GLuint buffer = find_bound_buffer(target);
     if (buffer && has_buffer(buffer)) {
         auto& mapping = g_buffer_mapping[buffer];
@@ -610,13 +611,19 @@ GLAPI GLAPIENTRY void glBufferSubDataARB(GLenum target, GLintptr offset, GLsizei
 void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     GLuint buffer = find_bound_buffer(target);
     
+    
     // 修复点1: 正确处理非托管缓冲区
     if (!buffer || !has_buffer(buffer) || buffer == 0) {
         return GLES.glMapBufferRange(target, offset, length, access);
     }
 
     size_t bufferSize = get_buffer_data_size(buffer);
-    if (bufferSize == 0 || offset < 0 || (size_t)(offset + length) > bufferSize) {
+    printf("[MGLOG] glMapBufferRange: target=%x, buffer=%u, offset=%zd, length=%zd, bufferSize=%zd\n", target, buffer, offset, length, bufferSize);
+    if (bufferSize == 0) {
+        printf("[MGLOG] ERROR: bufferSize==0 for buffer %u!\n", buffer);
+    }
+    
+    if (offset < 0 || (size_t)(offset + length) > bufferSize) {
         return nullptr;
     }
 
