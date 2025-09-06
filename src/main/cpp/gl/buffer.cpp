@@ -606,10 +606,13 @@ GLAPI GLAPIENTRY void glBufferSubDataARB(GLenum target, GLintptr offset, GLsizei
 }
 #endif
 
+// ================ 关键修复开始 ================ //
 void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     GLuint buffer = find_bound_buffer(target);
-    if (!buffer || !has_buffer(buffer)) {
-        return nullptr;
+    
+    // 修复点1: 正确处理非托管缓冲区
+    if (!buffer || !has_buffer(buffer) || buffer == 0) {
+        return GLES.glMapBufferRange(target, offset, length, access);
     }
 
     size_t bufferSize = get_buffer_data_size(buffer);
@@ -627,22 +630,14 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
         if (!mapping.shadowBuffer) {
             return nullptr;
         }
-        
+
         // 关键修复：确保新分配的缓冲区初始化为0
         memset(mapping.shadowBuffer, 0, bufferSize);
 
-        // 仅在需要时从GPU读取数据
-        if (access & GL_MAP_READ_BIT) {
-            GLuint real_buffer = find_real_buffer(buffer);
-            if (real_buffer) {
-                GLES.glBindBuffer(target, real_buffer);
-                void* gpuData = GLES.glMapBufferRange(target, 0, bufferSize, GL_MAP_READ_BIT);
-                if (gpuData) {
-                    memcpy(mapping.shadowBuffer, gpuData, bufferSize);
-                    GLES.glUnmapBuffer(target);
-                }
-                // 如果映射失败，保持初始化的0值
-            }
+        // 修复点2: 移除强制从GPU读取数据的逻辑
+        // 仅在映射为写操作时标记为脏数据
+        if (access & GL_MAP_WRITE_BIT) {
+            mapping.isDirty = true;
         }
     }
 
@@ -657,8 +652,10 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
 
 GLboolean glUnmapBuffer(GLenum target) {
     GLuint buffer = find_bound_buffer(target);
-    if (!buffer || !has_buffer(buffer)) {
-        return GL_FALSE;
+    
+    // 修复点3: 正确处理非托管缓冲区
+    if (!buffer || !has_buffer(buffer) || buffer == 0) {
+        return GLES.glUnmapBuffer(target);
     }
 
     auto it = g_buffer_mapping.find(buffer);
@@ -685,6 +682,7 @@ GLboolean glUnmapBuffer(GLenum target) {
     mapping.isMapped = false;
     return result;
 }
+// ================ 关键修复结束 ================ //
 
 void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
     GLenum usage = (flags & GL_DYNAMIC_STORAGE_BIT) ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW;
@@ -718,7 +716,10 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
 
 void glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
     GLuint buffer = find_bound_buffer(target);
-    if (!buffer || !has_buffer(buffer)) {
+    
+    // 修复点4: 正确处理非托管缓冲区
+    if (!buffer || !has_buffer(buffer) || buffer == 0) {
+        GLES.glFlushMappedBufferRange(target, offset, length);
         return;
     }
 
